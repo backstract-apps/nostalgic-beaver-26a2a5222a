@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: nostalgic-beaver-26a2a5222a-srv
+  namespace: apps-dev
+spec:
+  selector:
+    app: nostalgic-beaver-26a2a5222a
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 7070
+  type: ClusterIP
