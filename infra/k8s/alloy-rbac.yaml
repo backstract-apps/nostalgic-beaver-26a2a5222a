@@ -4,7 +4,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: alloy-service-account
-  namespace: apps-dev
+  namespace: default
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -29,4 +29,4 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: alloy-service-account
-  namespace: apps-dev
+  namespace: default
