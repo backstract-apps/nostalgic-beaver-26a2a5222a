@@ -3,7 +3,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: nostalgic-beaver-26a2a5222a-bst-token
-  namespace: apps-dev
+  namespace: default
   labels:
     app: nostalgic-beaver-26a2a5222a
     managed-by: backstract
@@ -17,7 +17,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: nostalgic-beaver-26a2a5222a-depl
-  namespace: apps-dev
+  namespace: default
   labels:
     app: nostalgic-beaver-26a2a5222a
     release: prometheus # Added label for PodMonitor discovery
