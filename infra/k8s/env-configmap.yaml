@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: env-configmap-coll-85fd6620c07e48dc8f1e5ab58f9c1e28
-  namespace: apps-dev
+  namespace: default
 data:
     RATE_LIMITER_CAPACITY: "5"
     RATE_LIMITER_REFILL_RATE: "3"
