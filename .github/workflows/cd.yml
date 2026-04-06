@@ -31,32 +31,32 @@ jobs:
           fetch-depth: 1
           lfs: false
 
-      - name: Install AWS CLI v2 (temporary; remove once baked into runner image)
-        timeout-minutes: 5
-        run: |
-          set -euo pipefail
-          if command -v aws >/dev/null 2>&1; then
-            aws --version
-            exit 0
-          fi
-          if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update -y
-            sudo apt-get install -y unzip curl
-          elif command -v yum >/dev/null 2>&1; then
-            sudo yum install -y unzip curl
-          else
-            echo "ERROR: Neither apt-get nor yum found."
-            exit 1
-          fi
-          curl -sSLo /tmp/awscliv2.zip "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
-          unzip -q /tmp/awscliv2.zip -d /tmp
-          sudo /tmp/aws/install --update
-          aws --version
+      # - name: Install AWS CLI v2 (temporary; remove once baked into runner image)
+      #   timeout-minutes: 5
+      #   run: |
+      #     set -euo pipefail
+      #     if command -v aws >/dev/null 2>&1; then
+      #       aws --version
+      #       exit 0
+      #     fi
+      #     if command -v apt-get >/dev/null 2>&1; then
+      #       sudo apt-get update -y
+      #       sudo apt-get install -y unzip curl
+      #     elif command -v yum >/dev/null 2>&1; then
+      #       sudo yum install -y unzip curl
+      #     else
+      #       echo "ERROR: Neither apt-get nor yum found."
+      #       exit 1
+      #     fi
+      #     curl -sSLo /tmp/awscliv2.zip "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
+      #     unzip -q /tmp/awscliv2.zip -d /tmp
+      #     sudo /tmp/aws/install --update
+      #     aws --version
 
-      - name: Install kubectl
-        uses: azure/setup-kubectl@v4
-        with:
-          version: 'v1.31.0'
+      # - name: Install kubectl
+      #   uses: azure/setup-kubectl@v4
+      #   with:
+      #     version: 'v1.31.0'
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
