@@ -3,107 +3,139 @@ name: CD - Deploy to Cloud
 on:
   push:
     branches: [ master ]
-  # pull_request:
-  #   branches: [ master ]
+
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   deploy:
     name: Build Docker image and Push to AWS ECR and Deploy to EKS
-    runs-on: ubuntu-latest
+    runs-on: prod-eks-runners
+    timeout-minutes: 45
+
+    env:
+      AWS_REGION: ap-south-1
+      EKS_CLUSTER: backstract-dev
+      ECR_REPO: backstract_apps
+      STATIC_TAG: nostalgic-beaver-26a2a5222a
+      INFRA_DIR: infra/k8s
+
+      # Deploy app objects here (NOT arc-runners)
+      APP_NAMESPACE: default
 
     steps:
-    - name: Check out code
-      uses: actions/checkout@v3
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          lfs: false
 
-    - name: Setup job
-      uses: ./.github/actions/log-streamer
-      with:
-        step_name: "Setup job"
-        command: |
-          echo "Runner environment: $(uname -a)"
-          echo "Available disk space: $(df -h / | tail -1)"
-          echo "Memory info: $(free -h)"
-          echo "Job setup completed"
-        endpoint: https://api-release.beemerbenzbentley.site/sigma/api/v1/logs/github
-        token: none
+      - name: Install AWS CLI v2 (temporary; remove once baked into runner image)
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          if command -v aws >/dev/null 2>&1; then
+            aws --version
+            exit 0
+          fi
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y unzip curl
+          elif command -v yum >/dev/null 2>&1; then
+            sudo yum install -y unzip curl
+          else
+            echo "ERROR: Neither apt-get nor yum found."
+            exit 1
+          fi
+          curl -sSLo /tmp/awscliv2.zip "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
+          unzip -q /tmp/awscliv2.zip -d /tmp
+          sudo /tmp/aws/install --update
+          aws --version
 
-    - name: Checkout code
-      uses: ./.github/actions/log-streamer
-      with:
-        step_name: "Checkout code"
-        command: |
-          echo "Code checkout completed"
-          echo "Repository: ${{ github.repository }}"
-          echo "Branch: ${{ github.ref_name }}"
-          echo "Commit SHA: ${{ github.sha }}"
-          ls -la
-        endpoint: https://api-release.beemerbenzbentley.site/sigma/api/v1/logs/github
-        token: none
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.31.0'
 
-    - name: Install Kube Control
-      uses: azure/setup-kubectl@v4
-      with:
-        version: 'v1.31.0'
-      id: install
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v1
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ap-south-1
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
 
-    - name: Login to Amazon ECR
-      id: login-ecr
-      uses: aws-actions/amazon-ecr-login@v1
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-    - name: Build, tag, and push docker image to Amazon ECR
-      uses: ./.github/actions/log-streamer
-      with:
-        step_name: "Build, tag, and push docker image to Amazon ECR"
-        command: |
-          docker build -t ${{ steps.login-ecr.outputs.registry }}/backstract_apps:${{ github.sha }} -t ${{ steps.login-ecr.outputs.registry }}/backstract_apps:nostalgic-beaver-26a2a5222a .
-          docker push -a ${{ steps.login-ecr.outputs.registry }}/backstract_apps
-        endpoint: https://api-release.beemerbenzbentley.site/sigma/api/v1/logs/github
-        token: none
+      - name: Build and push to ECR (BuildKit + registry cache)
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          IMAGE="${REGISTRY}/${ECR_REPO}"
+          SHA_TAG="${GITHUB_SHA}"
 
-    - name: Update kube config to point to EKS
-      uses: ./.github/actions/log-streamer
-      with:
-        step_name: "Update kube config to point to EKS"
-        command: aws eks update-kubeconfig --name backstract-dev --region ap-south-1
-        endpoint: https://api-release.beemerbenzbentley.site/sigma/api/v1/logs/github
-        token: none
+          docker buildx create --use --name builder >/dev/null 2>&1 || docker buildx use builder
 
-    - name: Deploy to AWS EKS Cluster
-      uses: ./.github/actions/log-streamer
-      with:
-        step_name: "Deploy to AWS EKS Cluster"
-        command: |
-          if [ -z "${BST_TOKEN}" ]; then
+          docker buildx build \
+            --platform linux/amd64 \
+            -t "${IMAGE}:${SHA_TAG}" \
+            -t "${IMAGE}:${STATIC_TAG}" \
+            --cache-from "type=registry,ref=${IMAGE}:buildcache" \
+            --cache-to "type=registry,ref=${IMAGE}:buildcache,mode=max" \
+            --push \
+            .
+
+      - name: Update kubeconfig to point to EKS
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          aws eks update-kubeconfig --name "${EKS_CLUSTER}" --region "${AWS_REGION}"
+
+      - name: Deploy to AWS EKS Cluster (fast path)
+        timeout-minutes: 15
+        env:
+          BST_TOKEN: ${{ secrets.BACKSTRACT_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${APP_NAMESPACE:-}" ]; then
+            echo "ERROR: APP_NAMESPACE is not set"
+            exit 1
+          fi
+
+          if [ -z "${BST_TOKEN:-}" ]; then
             echo "ERROR: BACKSTRACT_AUTH_TOKEN is empty or not set"
             exit 1
           fi
 
-          kubectl apply -f infra/k8s/alloy-rbac.yaml
-          kubectl apply -f infra/k8s/alloy-configmap.yaml
-          kubectl apply -f infra/k8s/aws-auth.yaml
-          kubectl apply -f infra/k8s/env-configmap.yaml
+          # Fewer kubectl calls
+          kubectl apply -n "${APP_NAMESPACE}" \
+            -f "${INFRA_DIR}/alloy-rbac.yaml" \
+            -f "${INFRA_DIR}/alloy-configmap.yaml" \
+            -f "${INFRA_DIR}/env-configmap.yaml"
 
-          awk -v token="${BST_TOKEN}" '{gsub(/PLACEHOLDER_BST_TOKEN_REPLACE_AT_RUNTIME/, token)}1' "$INFRA_DIR/deployment.yaml" > /tmp/deployment.yaml
+          # Token inject
+          awk -v token="${BST_TOKEN}" '{gsub(/PLACEHOLDER_BST_TOKEN_REPLACE_AT_RUNTIME/, token)}1' "${INFRA_DIR}/deployment.yaml" > /tmp/deployment.yaml
 
           if grep -q "PLACEHOLDER_BST_TOKEN_REPLACE_AT_RUNTIME" /tmp/deployment.yaml; then
             echo "ERROR: Token injection failed - placeholder still exists"
             exit 1
           fi
 
-          kubectl apply -f /tmp/deployment.yaml
-          kubectl apply -f "$INFRA_DIR/service.yaml"
-          kubectl rollout restart deployment "nostalgic-beaver-26a2a5222a-depl"
-          kubectl apply -f infra/k8s/aws-auth.yaml
-          kubectl get pods -l "app=nostalgic-beaver-26a2a5222a"
-        endpoint: https://api-release.beemerbenzbentley.site/sigma/api/v1/logs/github
-        token: ${{ secrets.BACKSTRACT_AUTH_TOKEN }}
-      env:
-        BST_TOKEN: ${{ secrets.BACKSTRACT_AUTH_TOKEN }}
-        INFRA_DIR: infra/k8s
+          kubectl apply -n "${APP_NAMESPACE}" -f /tmp/deployment.yaml -o name | tee /tmp/applied_names.txt >/dev/null
+          kubectl apply -n "${APP_NAMESPACE}" -f "${INFRA_DIR}/service.yaml"
+
+          DEPLOYMENT_NAME="$(grep '^deployment\.apps/' /tmp/applied_names.txt | sed -n '1p' | sed 's#deployment\.apps/##')"
+          echo "Deployment: ${DEPLOYMENT_NAME}"
+
+          # Keep your current behavior (predictable)
+          kubectl rollout restart -n "${APP_NAMESPACE}" deployment "${DEPLOYMENT_NAME}"
+          kubectl rollout status -n "${APP_NAMESPACE}" deployment "${DEPLOYMENT_NAME}" --timeout=600s
+
+          kubectl get -n "${APP_NAMESPACE}" pods -o wide
