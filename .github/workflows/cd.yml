@@ -14,6 +14,10 @@ jobs:
     runs-on: prod-eks-runners
     timeout-minutes: 45
 
+    permissions:
+      id-token: write
+      contents: read
+
     env:
       AWS_REGION: ap-south-1
       EKS_CLUSTER: backstract-dev
@@ -31,39 +35,23 @@ jobs:
           fetch-depth: 1
           lfs: false
 
-      # - name: Install AWS CLI v2 (temporary; remove once baked into runner image)
-      #   timeout-minutes: 5
-      #   run: |
-      #     set -euo pipefail
-      #     if command -v aws >/dev/null 2>&1; then
-      #       aws --version
-      #       exit 0
-      #     fi
-      #     if command -v apt-get >/dev/null 2>&1; then
-      #       sudo apt-get update -y
-      #       sudo apt-get install -y unzip curl
-      #     elif command -v yum >/dev/null 2>&1; then
-      #       sudo yum install -y unzip curl
-      #     else
-      #       echo "ERROR: Neither apt-get nor yum found."
-      #       exit 1
-      #     fi
-      #     curl -sSLo /tmp/awscliv2.zip "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
-      #     unzip -q /tmp/awscliv2.zip -d /tmp
-      #     sudo /tmp/aws/install --update
-      #     aws --version
+      - name: Debug GitHub ref
+        run: |
+          echo "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
+          echo "GITHUB_REF=$GITHUB_REF"
+          echo "GITHUB_REF_NAME=$GITHUB_REF_NAME"
+          echo "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME"
 
-      # - name: Install kubectl
-      #   uses: azure/setup-kubectl@v4
-      #   with:
-      #     version: 'v1.31.0'
-
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: arn:aws:iam::216084506783:role/GitHubActionsDeployRole
           aws-region: ${{ env.AWS_REGION }}
+
+      - name: Sanity check AWS identity
+        run: |
+          set -euo pipefail
+          aws sts get-caller-identity
 
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
@@ -96,6 +84,11 @@ jobs:
         run: |
           set -euo pipefail
           aws eks update-kubeconfig --name "${EKS_CLUSTER}" --region "${AWS_REGION}"
+
+      - name: Sanity check kubectl access
+        run: |
+          set -euo pipefail
+          kubectl get ns
 
       - name: Deploy to AWS EKS Cluster (fast path)
         timeout-minutes: 15
