@@ -100,6 +100,12 @@ jobs:
             --push \
             .
 
+      - name: Update kubeconfig to point to EKS
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          aws eks update-kubeconfig --name "${EKS_CLUSTER}" --region "${AWS_REGION}"
+
       # -------------------------
       # Deploy (in-cluster, no kubeconfig)
       # -------------------------
