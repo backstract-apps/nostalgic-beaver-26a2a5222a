@@ -10,9 +10,9 @@ concurrency:
 
 jobs:
   deploy:
-    name: Build → Push → Deploy (Optimized)
+    name: Build Docker image and Push to AWS ECR and Deploy to EKS
     runs-on: prod-eks-runners
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     permissions:
       id-token: write
@@ -22,71 +22,49 @@ jobs:
       AWS_REGION: ap-south-1
       EKS_CLUSTER: backstract-dev
       ECR_REPO: backstract_apps
+      STATIC_TAG: nostalgic-beaver-26a2a5222a
       INFRA_DIR: infra/k8s
+
+      # Deploy app objects here (NOT arc-runners)
       APP_NAMESPACE: default
 
     steps:
-      # -------------------------
-      # Checkout (fast)
-      # -------------------------
-      - name: Checkout
+      - name: Check out code
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
           lfs: false
 
-      # -------------------------
-      # Detect changes (skip build if not needed)
-      # -------------------------
-      - name: Detect changes
-        id: changes
+      - name: Debug GitHub ref
         run: |
-          set -e
-          if git diff --name-only HEAD~1 | grep -E 'Dockerfile|src/|package.json|requirements.txt'; then
-            echo "build_needed=true" >> $GITHUB_OUTPUT
-          else
-            echo "build_needed=false" >> $GITHUB_OUTPUT
-          fi
+          echo "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
+          echo "GITHUB_REF=$GITHUB_REF"
+          echo "GITHUB_REF_NAME=$GITHUB_REF_NAME"
+          echo "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME"
 
-      # -------------------------
-      # AWS Auth via OIDC
-      # -------------------------
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::216084506783:role/GitHubActionsDeployRole
           aws-region: ${{ env.AWS_REGION }}
 
-      # -------------------------
-      # Get AWS Account ID once
-      # -------------------------
-      - name: Get AWS Account ID
-        id: aws
+      - name: Sanity check AWS identity
         run: |
-          set -e
-          echo "account_id=$(aws sts get-caller-identity --query Account --output text)" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          aws sts get-caller-identity
 
-      # -------------------------
-      # ECR Login
-      # -------------------------
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
-      # -------------------------
-      # Setup Buildx
-      # -------------------------
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # -------------------------
-      # Build & Push (only if needed)
-      # -------------------------
-      - name: Build and push image
-        if: steps.changes.outputs.build_needed == 'true'
+      - name: Build and push to ECR (BuildKit + registry cache)
+        timeout-minutes: 25
         run: |
           set -euo pipefail
-
-          REGISTRY="${{ steps.aws.outputs.account_id }}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
           IMAGE="${REGISTRY}/${ECR_REPO}"
           SHA_TAG="${GITHUB_SHA}"
 
@@ -95,71 +73,62 @@ jobs:
           docker buildx build \
             --platform linux/amd64 \
             -t "${IMAGE}:${SHA_TAG}" \
+            -t "${IMAGE}:${STATIC_TAG}" \
             --cache-from "type=registry,ref=${IMAGE}:buildcache" \
             --cache-to "type=registry,ref=${IMAGE}:buildcache,mode=max" \
             --push \
             .
-      # Update Kubeconfig
+
       - name: Update kubeconfig to point to EKS
         timeout-minutes: 8
         run: |
           set -euo pipefail
           aws eks update-kubeconfig --name "${EKS_CLUSTER}" --region "${AWS_REGION}"
 
-      # -------------------------
-      # Deploy (in-cluster, no kubeconfig)
-      # -------------------------
-      - name: Deploy to EKS (fast path)
-        timeout-minutes: 10
+      - name: Sanity check kubectl access
+        run: |
+          set -euo pipefail
+          kubectl get ns
+
+      - name: Deploy to AWS EKS Cluster (fast path)
+        timeout-minutes: 15
         env:
           BST_TOKEN: ${{ secrets.BACKSTRACT_AUTH_TOKEN }}
         run: |
           set -euo pipefail
 
           if [ -z "${APP_NAMESPACE:-}" ]; then
-            echo "ERROR: APP_NAMESPACE not set"
+            echo "ERROR: APP_NAMESPACE is not set"
             exit 1
           fi
 
           if [ -z "${BST_TOKEN:-}" ]; then
-            echo "ERROR: BACKSTRACT_AUTH_TOKEN missing"
+            echo "ERROR: BACKSTRACT_AUTH_TOKEN is empty or not set"
             exit 1
           fi
 
-          REGISTRY="${{ steps.aws.outputs.account_id }}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-          IMAGE="${REGISTRY}/${ECR_REPO}"
-          SHA_TAG="${GITHUB_SHA}"
-
-          # Apply base configs (server-side for speed)
-          kubectl apply --server-side -n "${APP_NAMESPACE}" \
+          # Fewer kubectl calls
+          kubectl apply -n "${APP_NAMESPACE}" \
             -f "${INFRA_DIR}/alloy-rbac.yaml" \
             -f "${INFRA_DIR}/alloy-configmap.yaml" \
             -f "${INFRA_DIR}/env-configmap.yaml"
 
-          # Inject token into deployment
-          awk -v token="${BST_TOKEN}" '{gsub(/PLACEHOLDER_BST_TOKEN_REPLACE_AT_RUNTIME/, token)}1' \
-            "${INFRA_DIR}/deployment.yaml" > /tmp/deployment.yaml
+          # Token inject
+          awk -v token="${BST_TOKEN}" '{gsub(/PLACEHOLDER_BST_TOKEN_REPLACE_AT_RUNTIME/, token)}1' "${INFRA_DIR}/deployment.yaml" > /tmp/deployment.yaml
 
           if grep -q "PLACEHOLDER_BST_TOKEN_REPLACE_AT_RUNTIME" /tmp/deployment.yaml; then
-            echo "ERROR: Token injection failed"
+            echo "ERROR: Token injection failed - placeholder still exists"
             exit 1
           fi
 
-          # Apply deployment
-          kubectl apply -n "${APP_NAMESPACE}" -f /tmp/deployment.yaml -o name | tee /tmp/applied.txt >/dev/null
-
+          kubectl apply -n "${APP_NAMESPACE}" -f /tmp/deployment.yaml -o name | tee /tmp/applied_names.txt >/dev/null
           kubectl apply -n "${APP_NAMESPACE}" -f "${INFRA_DIR}/service.yaml"
 
-          DEPLOYMENT_NAME="$(grep '^deployment\.apps/' /tmp/applied.txt | sed 's#deployment\.apps/##')"
+          DEPLOYMENT_NAME="$(grep '^deployment\.apps/' /tmp/applied_names.txt | sed -n '1p' | sed 's#deployment\.apps/##')"
           echo "Deployment: ${DEPLOYMENT_NAME}"
 
-          # Update image ONLY (no forced restart)
-          kubectl set image deployment/${DEPLOYMENT_NAME} \
-            *="${IMAGE}:${SHA_TAG}" \
-            -n "${APP_NAMESPACE}" || true
+          # Keep your current behavior (predictable)
+          kubectl rollout restart -n "${APP_NAMESPACE}" deployment "${DEPLOYMENT_NAME}"
+          kubectl rollout status -n "${APP_NAMESPACE}" deployment "${DEPLOYMENT_NAME}" --timeout=600s
 
-          # Wait for rollout
-          kubectl rollout status deployment/${DEPLOYMENT_NAME} \
-            -n "${APP_NAMESPACE}" --timeout=300s
-
-          kubectl get pods -n "${APP_NAMESPACE}" -o wide
+          kubectl get -n "${APP_NAMESPACE}" pods -o wide
