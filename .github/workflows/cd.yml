@@ -99,7 +99,7 @@ jobs:
             --cache-to "type=registry,ref=${IMAGE}:buildcache,mode=max" \
             --push \
             .
-
+      # Update Kubeconfig
       - name: Update kubeconfig to point to EKS
         timeout-minutes: 8
         run: |
